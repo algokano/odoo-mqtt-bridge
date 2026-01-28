@@ -1,5 +1,10 @@
 # Odoo MQTT Bridge PoC
 
+<img width="1728" height="645" alt="Screenshot 2026-01-28 at 17 38 18" src="https://github.com/user-attachments/assets/e8594e8a-863f-4e91-ba53-ea558e2848f7" />
+
+<img width="574" height="178" alt="Screenshot 2026-01-28 at 17 38 39" src="https://github.com/user-attachments/assets/aa0712b8-37cd-4d4d-906d-4919c5171cec" />
+
+
 A simple bridge that listens to MQTT messages and updates Odoo system parameters via JSON-RPC.
 
 ## Prerequisites
