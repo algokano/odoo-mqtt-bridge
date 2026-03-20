@@ -89,6 +89,58 @@ class TestRequestNext(unittest.TestCase):
         self.assertIsNone(result["picking"])
         self.assertIn("No pickings", result["message"])
 
+    def test_skips_fully_picked_picking(self):
+        self.odoo.get_ready_pickings.return_value = [
+            {
+                "id": 1, "name": "WH/OUT/00001",
+                "partner_id": [10, "Customer A"],
+                "scheduled_date": "2026-03-11", "origin": "SO001",
+            },
+            {
+                "id": 2, "name": "WH/OUT/00002",
+                "partner_id": [11, "Customer B"],
+                "scheduled_date": "2026-03-12", "origin": "SO002",
+            },
+        ]
+
+        def mock_get_move_lines(picking_id):
+            if picking_id == 1:
+                return [{
+                    "id": 101, "product_id": [7, "Widget A"],
+                    "product_name": "Widget A", "barcode": False,
+                    "location_id": [1, "WH/Stock"], "location_dest_id": [2, "WH/Output"],
+                    "quantity": 10.0, "picked": True, "uom": "Units",
+                }]
+            return [{
+                "id": 201, "product_id": [8, "Widget B"],
+                "product_name": "Widget B", "barcode": "1234567890",
+                "location_id": [1, "WH/Stock"], "location_dest_id": [2, "WH/Output"],
+                "quantity": 5.0, "picked": False, "uom": "Units",
+            }]
+
+        self.odoo.get_move_lines.side_effect = mock_get_move_lines
+        result = handle_request_next(self.odoo, {})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["picking"]["id"], 2)
+        self.assertEqual(result["picking"]["name"], "WH/OUT/00002")
+        self.assertEqual(len(result["picking"]["lines"]), 1)
+        self.assertFalse(result["picking"]["lines"][0]["picked"])
+
+    def test_all_pickings_fully_picked(self):
+        self.odoo.get_ready_pickings.return_value = [
+            {"id": 1, "name": "WH/OUT/00001", "partner_id": False,
+             "scheduled_date": "2026-03-11", "origin": None},
+        ]
+        self.odoo.get_move_lines.return_value = [{
+            "id": 101, "product_id": [7, "Widget A"],
+            "product_name": "Widget A", "barcode": False,
+            "location_id": [1, "WH/Stock"], "location_dest_id": [2, "WH/Output"],
+            "quantity": 10.0, "picked": True, "uom": "Units",
+        }]
+        result = handle_request_next(self.odoo, {})
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["picking"])
+
 
 class TestConfirmItem(unittest.TestCase):
     def setUp(self):

@@ -42,7 +42,8 @@ class MqttBridge:
         handler = ROUTES.get(topic)
 
         if not handler:
-            logger.warning("No handler for topic: %s", topic)
+            if not topic.endswith("/response"):
+                logger.warning("No handler for topic: %s", topic)
             return
 
         try:

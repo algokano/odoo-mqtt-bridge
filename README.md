@@ -1,9 +1,18 @@
-# Odoo MQTT Bridge
+# Odoo MQTT Bridge + Voice Picking
 
-A Python bridge that connects Odoo and MQTT for warehouse picking workflows. External devices (barcode scanners, voice picking, projection systems) communicate via MQTT; the bridge translates commands into Odoo RPC calls and publishes Odoo events back to MQTT.
+A Python bridge that connects Odoo and MQTT for warehouse picking workflows, extended with a **local pick-by-voice system**. External devices (barcode scanners, voice picking, projection systems) communicate via MQTT; the bridge translates commands into Odoo RPC calls and publishes Odoo events back to MQTT.
 
 ```
-[IoT Devices] <--MQTT--> [Bridge (Python)] <--JSON-RPC--> [Odoo 17]
+┌─────────────────┐     MQTT      ┌─────────────────┐    JSON-RPC    ┌──────────┐
+│  Voice Client   │◄────────────►│  Mosquitto      │◄──────────────►│  Bridge  │──► Odoo 17
+│  (voice/)       │   port 1883   │  (Docker)       │                │  (app/)  │    (Docker)
+│                 │               └─────────────────┘                └──────────┘
+│ • STT (Whisper) │
+│ • TTS (macOS)   │
+│ • State machine │
+└─────────────────┘
+     ▲       ▼
+   [AirPods / Mic]
 ```
 
 <img width="600" alt="Screenshot 2026-01-28 at 17 38 18" src="https://github.com/user-attachments/assets/e8594e8a-863f-4e91-ba53-ea558e2848f7" />
@@ -13,8 +22,10 @@ A Python bridge that connects Odoo and MQTT for warehouse picking workflows. Ext
 ## Prerequisites
 
 - Docker & Docker Compose
-- Python 3.8+
+- Python 3.11+
+- macOS (for voice TTS via `say` command)
 - (Optional) Mosquitto CLI tools for testing: `brew install mosquitto`
+- (Optional) AirPods or any Bluetooth headset for hands-free voice picking
 
 ## Quick Start
 
@@ -106,6 +117,96 @@ You should see:
 2026-03-11 11:00:15 [mqtt_client] INFO: Subscribed to warehouse/picking/#
 ```
 
+---
+
+## Voice Picking Client
+
+The voice client is a separate component that communicates with the bridge through MQTT. It provides hands-free, eyes-free warehouse picking using speech recognition and text-to-speech.
+
+### Install Voice Dependencies
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-voice.txt
+```
+
+The first run will download the Whisper speech recognition model (~141 MB).
+
+### Run the Voice Client
+
+Make sure the bridge is already running (step 7 above), then in a separate terminal:
+
+```bash
+# Simple mode — say "next item" and "confirm <qty>"
+python -m voice
+
+# Verified mode — with location check digit and quantity verification
+python -m voice --mode verified
+
+# List available audio devices (check AirPods are detected)
+python -m voice --list-devices
+```
+
+### Text-Based Test Mode (no microphone needed)
+
+Test the full MQTT flow by typing commands instead of speaking:
+
+```bash
+# Simple mode
+python -m voice.test_flow
+
+# Verified mode
+python -m voice.test_flow --mode verified
+```
+
+### Voice Workflow — Simple Mode
+
+| Step | You say | System responds |
+|------|---------|-----------------|
+| 1 | *"next item"* | *"Order WH/OUT/00007 for Wood Corner. Item 1 of 1. Go to WH Stock. Pick 50 Units of Large Cabinet."* |
+| 2 | *"confirm fifty"* | *"Confirmed. All items picked for order WH/OUT/00007. Say next item for the next order."* |
+| 3 | *"next item"* | Next picking or *"No pickings available."* |
+| 4 | *"stop"* | *"Voice picking stopped. Goodbye."* |
+
+### Voice Workflow — Verified Mode
+
+| Step | You say | System responds |
+|------|---------|-----------------|
+| 1 | *"next item"* | *"Order WH/OUT/00007 for Wood Corner. Item 1 of 1."* |
+| 2 | — | *"Go to location WH Stock. Check digit: 37."* |
+| 3 | *"thirty seven"* or *"three seven"* | *"Correct."* |
+| 4 | — | *"Pick Large Cabinet."* (barcode check if available) |
+| 5 | — | *"Pick 50 Units. Say the quantity."* |
+| 6 | *"fifty"* | *"Confirmed. All items picked..."* |
+
+### Supported Voice Commands
+
+| Command | Action |
+|---------|--------|
+| *"next item"* / *"next"* | Request next picking |
+| *"confirm 50"* / *"confirm fifty"* | Confirm picked quantity |
+| *"repeat"* / *"say again"* | Repeat last instruction |
+| *"stop"* / *"quit"* | Exit the voice client |
+| *"yes"* / *"correct"* | Affirmative response (verified mode) |
+| *"no"* / *"wrong"* | Negative response (verified mode) |
+| Any number (*"37"*, *"three seven"*) | Check digit or barcode response |
+
+### Voice Configuration
+
+Additional environment variables for the voice client (add to `.env`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VOICE_DEVICE_ID` | `voice-01` | Device identifier in MQTT payloads |
+| `VOICE_PICKING_TYPE` | `outgoing` | Picking type filter |
+| `VOICE_MODE` | `simple` | `simple` or `verified` |
+| `WHISPER_MODEL` | `base.en` | Whisper model size (`tiny.en`, `base.en`, `small.en`) |
+| `TTS_VOICE` | `Samantha` | macOS voice name |
+| `TTS_RATE` | `180` | Speech rate (words per minute) |
+| `RECORD_DURATION` | `3.0` | Recording duration in seconds |
+
+---
+
 ## Configuration
 
 All configuration is via environment variables:
@@ -123,7 +224,7 @@ All configuration is via environment variables:
 
 See `.env.example` for a template.
 
-## Testing All Features
+## Testing MQTT Commands
 
 ### Install Mosquitto CLI Tools
 
@@ -208,6 +309,8 @@ mosquitto_pub -h localhost -t "warehouse/picking/next" \
 }
 ```
 
+Only unpicked lines are returned. Fully picked pickings are automatically skipped.
+
 #### 4. Confirm a Picked Item
 
 Use a `move_line_id` from the response above:
@@ -252,37 +355,74 @@ The bridge polls Odoo every 10 seconds for picking state changes. To test:
 2. In the Odoo UI, change a picking's state (e.g., mark as Ready or Done)
 3. Within 10 seconds, you should see events on `warehouse/event/picking_ready` or `warehouse/event/picking_done`
 
-## Run Unit Tests
+## Run Tests
 
 ```bash
 source .venv/bin/activate
-python -m unittest tests.test_payloads -v
+python -m pytest tests/ -v
 ```
 
 ## Project Structure
 
 ```
-app/
+app/                            # MQTT–Odoo Bridge
   __init__.py
-  __main__.py          # python -m app entry point
-  config.py            # Environment variable configuration
-  main.py              # Bridge entry point with polling loop
-  mqtt_client.py       # MQTT client with topic routing
-  odoo_client.py       # Odoo JSON-RPC client
+  __main__.py                   # python -m app entry point
+  config.py                     # Environment variable configuration
+  main.py                       # Bridge entry point with polling loop
+  mqtt_client.py                # MQTT client with topic routing
+  odoo_client.py                # Odoo JSON-RPC client
   handlers/
     __init__.py
-    get_picking_list.py  # List assigned pickings
-    request_next.py      # Get next picking + lines
-    confirm_item.py      # Confirm a move line as picked
+    get_picking_list.py         # List assigned pickings
+    request_next.py             # Get next picking + unpicked lines
+    confirm_item.py             # Confirm a move line as picked
   utils/
     __init__.py
-    logger.py            # Logging setup
+    logger.py                   # Logging setup
+voice/                          # Voice Picking Client
+  __init__.py
+  __main__.py                   # python -m voice entry point
+  config.py                     # Voice-specific configuration
+  client.py                     # Main orchestrator (MQTT + state machine + audio)
+  state_machine.py              # Dialogue state machine
+  commands.py                   # Speech-to-intent parser
+  stt.py                        # Speech-to-text (faster-whisper)
+  tts.py                        # Text-to-speech (macOS say)
+  audio.py                      # Microphone recording (sounddevice)
+  prompts.py                    # TTS prompt templates
+  test_flow.py                  # Text-based test mode (no mic needed)
 docs/
-  mqtt_api.md          # MQTT topic and payload reference
+  mqtt_api.md                   # MQTT topic and payload reference
 tests/
-  test_payloads.py     # Unit tests for handlers
+  test_payloads.py              # Bridge handler unit tests
+  test_voice_commands.py        # Voice command parsing tests
+  test_voice_state.py           # Voice state machine tests
 ```
 
 ## MQTT API Reference
 
 See [docs/mqtt_api.md](docs/mqtt_api.md) for full topic and payload documentation.
+
+### Topics Overview
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `warehouse/picking/list` | Device → Bridge | List assigned pickings |
+| `warehouse/picking/next` | Device → Bridge | Get next picking with unpicked lines |
+| `warehouse/picking/confirm` | Device → Bridge | Confirm a move line as picked |
+| `warehouse/picking/*/response` | Bridge → Device | Response to the above commands |
+| `warehouse/event/picking_ready` | Bridge → Devices | Picking became ready (state → assigned) |
+| `warehouse/event/picking_done` | Bridge → Devices | Picking completed (state → done) |
+
+## Technology Stack
+
+| Component | Technology |
+|-----------|-----------|
+| ERP | Odoo 17 (Docker) |
+| Database | PostgreSQL 15 (Docker) |
+| MQTT Broker | Mosquitto 2 (Docker) |
+| Bridge | Python, paho-mqtt, requests |
+| Speech-to-Text | faster-whisper (local, offline) |
+| Text-to-Speech | macOS `say` command |
+| Audio Capture | sounddevice (PortAudio) |
