@@ -54,10 +54,16 @@ class MqttBridge:
 
         try:
             result = handler(self.odoo, payload)
+            # Echo request_id so callers can correlate responses
+            if "request_id" in payload:
+                result["request_id"] = payload["request_id"]
             self.publish(f"{topic}/response", result)
         except Exception as e:
             logger.exception("Handler error on %s", topic)
-            self.publish(f"{topic}/response", {"ok": False, "error": str(e)})
+            error_resp = {"ok": False, "error": str(e)}
+            if "request_id" in payload:
+                error_resp["request_id"] = payload["request_id"]
+            self.publish(f"{topic}/response", error_resp)
 
     def publish(self, topic: str, payload: dict):
         message = json.dumps(payload, default=str)
