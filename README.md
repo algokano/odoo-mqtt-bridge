@@ -27,6 +27,11 @@ A Python bridge that connects Odoo and MQTT for warehouse picking workflows, ext
 
 <img width="600" alt="Screenshot 2026-01-28 at 17 38 18" src="https://github.com/user-attachments/assets/e8594e8a-863f-4e91-ba53-ea558e2848f7" />
 
+WEB PAGE
+
+<img width="586" height="1280" alt="image" src="https://github.com/user-attachments/assets/55eb39bc-92ca-4867-b556-e53eec853397" />
+
+
 <img width="400" alt="Screenshot 2026-01-28 at 17 38 39" src="https://github.com/user-attachments/assets/aa0712b8-37cd-4d4d-906d-4919c5171cec" />
 
 ## Prerequisites
