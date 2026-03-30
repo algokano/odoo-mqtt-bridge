@@ -3,16 +3,26 @@
 A Python bridge that connects Odoo and MQTT for warehouse picking workflows, extended with a **local pick-by-voice system**. External devices (barcode scanners, voice picking, projection systems) communicate via MQTT; the bridge translates commands into Odoo RPC calls and publishes Odoo events back to MQTT.
 
 ```
-┌─────────────────┐     MQTT      ┌─────────────────┐    JSON-RPC    ┌──────────┐
-│  Voice Client   │◄────────────►│  Mosquitto      │◄──────────────►│  Bridge  │──► Odoo 17
-│  (voice/)       │   port 1883   │  (Docker)       │                │  (app/)  │    (Docker)
-│                 │               └─────────────────┘                └──────────┘
-│ • STT (Whisper) │
-│ • TTS (macOS)   │
-│ • State machine │
-└─────────────────┘
-     ▲       ▼
-   [AirPods / Mic]
+┌─────────────────┐                      ┌─────────────────┐                ┌──────────┐
+│  Voice Client   │    MQTT              │  Mosquitto      │   JSON-RPC     │  Bridge  │──► Odoo 17
+│  (voice/)       │◄──────────────────►  │  (Docker)       │◄──────────────►│  (app/)  │    (Docker)
+│ • STT (Whisper) │    port 1883         └────────┬────────┘                └──────────┘
+│ • TTS (macOS)   │                               │
+│ • State machine │                               │ MQTT
+└────────┬────────┘                      ┌────────▼────────┐
+   [Mic / AirPods]                       │  Web Voice      │
+                                         │  Server (web/)  │
+                                         │ • FastAPI + WS  │
+                                         │ • STT (Whisper) │
+                                         │ • TTS (Piper)   │
+                                         └────────┬────────┘
+                                                  │ WebSocket (wss://)
+                                         ┌────────▼────────┐
+                                         │  Mobile Phone   │
+                                         │  Browser        │
+                                         │ • Push-to-talk  │
+                                         │ • Audio playback│
+                                         └─────────────────┘
 ```
 
 <img width="600" alt="Screenshot 2026-01-28 at 17 38 18" src="https://github.com/user-attachments/assets/e8594e8a-863f-4e91-ba53-ea558e2848f7" />
@@ -23,7 +33,8 @@ A Python bridge that connects Odoo and MQTT for warehouse picking workflows, ext
 
 - Docker & Docker Compose
 - Python 3.11+
-- macOS (for voice TTS via `say` command)
+- ffmpeg (`brew install ffmpeg` on macOS)
+- (Optional) macOS for native voice client TTS via `say` command
 - (Optional) Mosquitto CLI tools for testing: `brew install mosquitto`
 - (Optional) AirPods or any Bluetooth headset for hands-free voice picking
 
@@ -119,9 +130,9 @@ You should see:
 
 ---
 
-## Voice Picking Client
+## Voice Picking Client (Native)
 
-The voice client is a separate component that communicates with the bridge through MQTT. It provides hands-free, eyes-free warehouse picking using speech recognition and text-to-speech.
+The voice client is a separate component that communicates with the bridge through MQTT. It provides hands-free, eyes-free warehouse picking using speech recognition and text-to-speech directly on the PC.
 
 ### Install Voice Dependencies
 
@@ -204,6 +215,113 @@ Additional environment variables for the voice client (add to `.env`):
 | `TTS_VOICE` | `Samantha` | macOS voice name |
 | `TTS_RATE` | `180` | Speech rate (words per minute) |
 | `RECORD_DURATION` | `3.0` | Recording duration in seconds |
+
+---
+
+## Web Voice Interface (Mobile)
+
+The web voice interface allows workers to use their **mobile phones** as wireless microphone/speaker devices. The phone opens a webpage with a push-to-talk button; all speech processing happens on the server.
+
+```
+Phone (browser)  ──WebSocket──►  Web Server (PC)  ──MQTT──►  Bridge  ──►  Odoo
+   mic input                     STT (Whisper)
+   audio output                  TTS (Piper)
+                                 State machine
+```
+
+### How It Works
+
+1. Worker opens `https://<server-ip>:8443` on their phone
+2. Worker presses and holds the **HOLD TO SPEAK** button
+3. Audio is sent over WebSocket to the server
+4. Server runs STT (faster-whisper), parses the command, communicates with Odoo via MQTT
+5. Server generates TTS audio (Piper) and sends it back
+6. Phone plays the spoken response
+
+### Install Web Dependencies
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-web.txt
+```
+
+### Download a Piper TTS Voice Model
+
+Download a voice model from the [Piper voices catalog](https://github.com/rhasspy/piper/blob/master/VOICES.md). Place the `.onnx` and `.onnx.json` files in the `models/` directory:
+
+```bash
+mkdir -p models
+# Example: download en_US-bryce-medium
+# Place en_US-bryce-medium.onnx and en_US-bryce-medium.onnx.json in models/
+```
+
+### Run the Web Voice Server
+
+Make sure the bridge is already running, then:
+
+```bash
+source .venv/bin/activate
+PIPER_MODEL=models/en_US-bryce-medium.onnx python -m web
+```
+
+For **localhost testing**, open `http://localhost:8443` in your browser.
+
+### HTTPS Setup (Required for Phone Access)
+
+Browsers require HTTPS for microphone access on non-localhost addresses. See [web/certs/README.md](web/certs/README.md) for full instructions.
+
+Quick setup with mkcert:
+
+```bash
+brew install mkcert
+mkcert -install
+
+# Generate cert for your LAN IP (find with: ifconfig | grep "inet ")
+cd web/certs
+mkcert 192.168.1.100   # replace with your IP
+```
+
+Then run the server with SSL:
+
+```bash
+SSL_CERTFILE=web/certs/192.168.1.100.pem \
+SSL_KEYFILE=web/certs/192.168.1.100-key.pem \
+PIPER_MODEL=models/en_US-bryce-medium.onnx \
+python -m web
+```
+
+Workers open `https://192.168.1.100:8443` on their phones.
+
+### Web Voice Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEB_HOST` | `0.0.0.0` | Server bind address |
+| `WEB_PORT` | `8443` | Server port |
+| `SSL_CERTFILE` | — | Path to SSL certificate (required for phone access) |
+| `SSL_KEYFILE` | — | Path to SSL private key |
+| `PIPER_MODEL` | — | Path to Piper `.onnx` model file |
+| `VOICE_MODE` | `simple` | `simple` or `verified` |
+| `WHISPER_MODEL` | `base.en` | Whisper model size |
+| `MQTT_HOST` | `localhost` | MQTT broker host |
+| `MQTT_PORT` | `1883` | MQTT broker port |
+
+### Running the Full Stack
+
+```bash
+# Terminal 1: Docker services
+docker-compose up -d
+
+# Terminal 2: MQTT-Odoo bridge
+source .venv/bin/activate
+python -m app
+
+# Terminal 3: Web voice server
+source .venv/bin/activate
+PIPER_MODEL=models/en_US-bryce-medium.onnx python -m web
+
+# Phone: open https://<server-ip>:8443
+```
 
 ---
 
@@ -365,7 +483,7 @@ python -m pytest tests/ -v
 ## Project Structure
 
 ```
-app/                            # MQTT–Odoo Bridge
+app/                            # MQTT-Odoo Bridge
   __init__.py
   __main__.py                   # python -m app entry point
   config.py                     # Environment variable configuration
@@ -380,7 +498,7 @@ app/                            # MQTT–Odoo Bridge
   utils/
     __init__.py
     logger.py                   # Logging setup
-voice/                          # Voice Picking Client
+voice/                          # Voice Picking Client (native)
   __init__.py
   __main__.py                   # python -m voice entry point
   config.py                     # Voice-specific configuration
@@ -392,6 +510,19 @@ voice/                          # Voice Picking Client
   audio.py                      # Microphone recording (sounddevice)
   prompts.py                    # TTS prompt templates
   test_flow.py                  # Text-based test mode (no mic needed)
+web/                            # Web Voice Interface (mobile)
+  __init__.py
+  __main__.py                   # python -m web entry point
+  config.py                     # Web server configuration
+  server.py                     # FastAPI app with WebSocket endpoint
+  session.py                    # Per-connection session (state machine + MQTT)
+  audio_convert.py              # WebM/Opus → 16kHz numpy via ffmpeg
+  tts_piper.py                  # Text-to-speech (Piper TTS, local)
+  static/
+    index.html                  # Mobile push-to-talk web UI
+  certs/
+    README.md                   # HTTPS certificate setup instructions
+models/                         # Piper TTS voice models (.onnx + .json)
 docs/
   mqtt_api.md                   # MQTT topic and payload reference
 tests/
@@ -424,5 +555,9 @@ See [docs/mqtt_api.md](docs/mqtt_api.md) for full topic and payload documentatio
 | MQTT Broker | Mosquitto 2 (Docker) |
 | Bridge | Python, paho-mqtt, requests |
 | Speech-to-Text | faster-whisper (local, offline) |
-| Text-to-Speech | macOS `say` command |
-| Audio Capture | sounddevice (PortAudio) |
+| Text-to-Speech (native) | macOS `say` command |
+| Text-to-Speech (web) | Piper TTS (local, offline) |
+| Audio Capture (native) | sounddevice (PortAudio) |
+| Audio Capture (web) | Browser MediaRecorder API |
+| Web Server | FastAPI, uvicorn, WebSocket |
+| Audio Conversion | ffmpeg |

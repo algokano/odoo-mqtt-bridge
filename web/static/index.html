@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Voice Picking</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        header {
+            padding: 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        header h1 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        #connection-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #e74c3c;
+            transition: background 0.3s;
+        }
+
+        #connection-dot.connected { background: #2ecc71; }
+        #connection-dot.connecting { background: #f39c12; }
+
+        #status-bar {
+            padding: 10px 20px;
+            font-size: 13px;
+            color: #a0a0b0;
+            background: #16213e;
+            border-bottom: 1px solid #0f3460;
+        }
+
+        #state-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            background: #0f3460;
+            color: #e94560;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        #prompt-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        #prompt-text {
+            font-size: 20px;
+            line-height: 1.5;
+            text-align: center;
+            padding: 20px;
+            min-height: 100px;
+        }
+
+        #transcript {
+            text-align: center;
+            font-size: 14px;
+            color: #7f8c8d;
+            padding: 10px 0;
+            min-height: 40px;
+        }
+
+        #transcript span {
+            color: #3498db;
+            font-style: italic;
+        }
+
+        #button-area {
+            padding: 20px 0 40px;
+            display: flex;
+            justify-content: center;
+        }
+
+        #talk-btn {
+            width: 140px;
+            height: 140px;
+            border-radius: 50%;
+            border: 4px solid #0f3460;
+            background: #16213e;
+            color: #eee;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            transition: all 0.15s;
+            -webkit-tap-highlight-color: transparent;
+            touch-action: none;
+        }
+
+        #talk-btn:active, #talk-btn.recording {
+            background: #e74c3c;
+            border-color: #c0392b;
+            transform: scale(1.08);
+        }
+
+        #talk-btn.processing {
+            background: #f39c12;
+            border-color: #e67e22;
+        }
+
+        #talk-btn .icon {
+            font-size: 36px;
+            margin-bottom: 4px;
+        }
+
+        #talk-btn .label {
+            font-size: 13px;
+        }
+
+        #talk-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Voice Picking</h1>
+        <div id="connection-dot" title="Disconnected"></div>
+    </header>
+
+    <div id="status-bar">
+        State: <span id="state-badge">CONNECTING</span>
+    </div>
+
+    <main>
+        <div id="prompt-area">
+            <div id="prompt-text">Connecting...</div>
+            <div id="transcript"></div>
+        </div>
+        <div id="button-area">
+            <button id="talk-btn" disabled>
+                <div class="icon">&#127908;</div>
+                <div class="label">HOLD TO SPEAK</div>
+            </button>
+        </div>
+    </main>
+
+    <script>
+    (function() {
+        // --- Elements ---
+        const dot = document.getElementById('connection-dot');
+        const stateBadge = document.getElementById('state-badge');
+        const promptText = document.getElementById('prompt-text');
+        const transcriptEl = document.getElementById('transcript');
+        const talkBtn = document.getElementById('talk-btn');
+
+        // --- State ---
+        let ws = null;
+        let mediaStream = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        let isProcessing = false;
+        let audioCtxUnlocked = false;
+
+        // --- WebSocket ---
+        function connect() {
+            const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const url = proto + '//' + location.host + '/ws';
+            dot.className = 'connecting';
+            dot.title = 'Connecting...';
+
+            ws = new WebSocket(url);
+            ws.binaryType = 'arraybuffer';
+
+            ws.onopen = function() {
+                dot.className = 'connected';
+                dot.title = 'Connected';
+                promptText.textContent = 'Connected. Waiting for server...';
+            };
+
+            ws.onmessage = function(evt) {
+                if (evt.data instanceof ArrayBuffer) {
+                    // Binary = WAV audio response
+                    playAudio(evt.data);
+                } else {
+                    // JSON message
+                    handleMessage(JSON.parse(evt.data));
+                }
+            };
+
+            ws.onclose = function() {
+                dot.className = '';
+                dot.title = 'Disconnected';
+                talkBtn.disabled = true;
+                promptText.textContent = 'Disconnected. Reconnecting...';
+                stateBadge.textContent = 'OFFLINE';
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = function() {
+                ws.close();
+            };
+        }
+
+        function handleMessage(msg) {
+            switch (msg.type) {
+                case 'state':
+                    stateBadge.textContent = msg.state || '';
+                    if (msg.text) {
+                        promptText.textContent = msg.text;
+                    }
+                    break;
+                case 'transcript':
+                    if (msg.text) {
+                        transcriptEl.innerHTML = 'You said: <span>"' + escapeHtml(msg.text) + '"</span>';
+                    }
+                    break;
+                case 'listening':
+                    isProcessing = false;
+                    talkBtn.classList.remove('processing');
+                    talkBtn.disabled = false;
+                    break;
+                case 'event':
+                    if (msg.event === 'picking_ready') {
+                        promptText.textContent = 'New picking available: ' + (msg.name || '') + '. Say next item.';
+                    }
+                    break;
+                case 'error':
+                    promptText.textContent = 'Error: ' + (msg.message || 'Unknown error');
+                    break;
+            }
+        }
+
+        // --- Audio Playback ---
+        function playAudio(arrayBuffer) {
+            if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
+            const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = function() { URL.revokeObjectURL(url); };
+            audio.onerror = function() { URL.revokeObjectURL(url); };
+            audio.play().catch(function(e) {
+                console.warn('Audio playback failed:', e);
+            });
+        }
+
+        // --- iOS Audio Context Unlock ---
+        function unlockAudio() {
+            if (audioCtxUnlocked) return;
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const buf = ctx.createBuffer(1, 1, 22050);
+            const src = ctx.createBufferSource();
+            src.buffer = buf;
+            src.connect(ctx.destination);
+            src.start(0);
+            if (ctx.state === 'suspended') {
+                ctx.resume();
+            }
+            audioCtxUnlocked = true;
+        }
+
+        // --- Microphone Recording ---
+        async function initMicrophone() {
+            if (mediaStream) return;
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        sampleRate: 16000,
+                    }
+                });
+            } catch (e) {
+                promptText.textContent = 'Microphone access denied. Please allow microphone access and reload.';
+                console.error('getUserMedia error:', e);
+            }
+        }
+
+        function startRecording() {
+            if (isRecording || isProcessing || !mediaStream) return;
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            audioChunks = [];
+            // Try WebM/Opus first, fall back to whatever the browser supports
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus'
+                : MediaRecorder.isTypeSupported('audio/webm')
+                    ? 'audio/webm'
+                    : '';
+
+            const options = mimeType ? { mimeType: mimeType } : {};
+            mediaRecorder = new MediaRecorder(mediaStream, options);
+
+            mediaRecorder.ondataavailable = function(e) {
+                if (e.data.size > 0) {
+                    audioChunks.push(e.data);
+                }
+            };
+
+            mediaRecorder.onstop = function() {
+                const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                sendAudio(blob);
+            };
+
+            mediaRecorder.start(100); // collect data every 100ms
+            isRecording = true;
+            talkBtn.classList.add('recording');
+        }
+
+        function stopRecording() {
+            if (!isRecording || !mediaRecorder) return;
+
+            mediaRecorder.stop();
+            isRecording = false;
+            isProcessing = true;
+            talkBtn.classList.remove('recording');
+            talkBtn.classList.add('processing');
+            talkBtn.disabled = true;
+        }
+
+        async function sendAudio(blob) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            const buffer = await blob.arrayBuffer();
+            ws.send(buffer);
+        }
+
+        // --- Push-to-Talk Button ---
+        function onPressStart(e) {
+            e.preventDefault();
+            unlockAudio();
+            startRecording();
+        }
+
+        function onPressEnd(e) {
+            e.preventDefault();
+            stopRecording();
+        }
+
+        // Touch events (mobile)
+        talkBtn.addEventListener('touchstart', onPressStart, { passive: false });
+        talkBtn.addEventListener('touchend', onPressEnd, { passive: false });
+        talkBtn.addEventListener('touchcancel', onPressEnd, { passive: false });
+
+        // Mouse events (desktop testing)
+        talkBtn.addEventListener('mousedown', onPressStart);
+        talkBtn.addEventListener('mouseup', onPressEnd);
+        talkBtn.addEventListener('mouseleave', function(e) {
+            if (isRecording) onPressEnd(e);
+        });
+
+        // --- Escape HTML ---
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // --- Init ---
+        async function init() {
+            await initMicrophone();
+            connect();
+        }
+
+        init();
+    })();
+    </script>
+</body>
+</html>
