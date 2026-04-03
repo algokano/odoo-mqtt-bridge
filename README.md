@@ -31,14 +31,45 @@ A Python bridge that connects Odoo and MQTT for warehouse picking workflows, ext
 
 <img width="400" alt="Voice Picking Demo" src="https://github.com/user-attachments/assets/aa0712b8-37cd-4d4d-906d-4919c5171cec" />
 
+## Platform Support
+
+The MQTT bridge, web voice server, and mobile webpage run on **any operating system** (Linux, macOS, Windows). No macOS-specific features are required.
+
+| Component | Linux | macOS | Windows |
+|-----------|:-----:|:-----:|:-------:|
+| Docker services (Odoo, PostgreSQL, Mosquitto) | Yes | Yes | Yes |
+| MQTT-Odoo Bridge (`app/`) | Yes | Yes | Yes |
+| Web Voice Server (`web/`) — Piper TTS + Whisper STT | Yes | Yes | Yes |
+| Mobile webpage (any phone browser) | Yes | Yes | Yes |
+| Native voice client (`voice/`) — uses macOS `say` | — | Yes | — |
+
+The native voice client (`voice/`) uses the macOS `say` command for text-to-speech and is a **development prototype only**. The production web voice server (`web/`) uses **Piper TTS**, which is fully cross-platform and open-source.
+
 ## Prerequisites
 
 - Docker & Docker Compose
 - Python 3.11+
-- ffmpeg (`brew install ffmpeg` on macOS)
-- (Optional) macOS for native voice client TTS via `say` command
-- (Optional) Mosquitto CLI tools for testing: `brew install mosquitto`
-- (Optional) AirPods or any Bluetooth headset for hands-free voice picking
+- ffmpeg
+
+**Install ffmpeg:**
+
+```bash
+# macOS
+brew install ffmpeg
+
+# Ubuntu / Debian
+sudo apt install ffmpeg
+
+# Windows (with Chocolatey)
+choco install ffmpeg
+
+# Windows (with winget)
+winget install ffmpeg
+```
+
+**Optional:**
+- Mosquitto CLI tools for MQTT testing (`brew install mosquitto` / `sudo apt install mosquitto-clients` / `choco install mosquitto`)
+- AirPods or any Bluetooth headset for hands-free voice picking
 
 ## Quick Start
 
@@ -98,8 +129,19 @@ Open `http://localhost:8069` in your browser and log in with your Odoo credentia
 ### 5. Set Up Python Environment
 
 ```bash
+# macOS / Linux
 python3 -m venv .venv
 source .venv/bin/activate
+pip install -r requirements.txt
+
+# Windows (PowerShell)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# Windows (CMD)
+python -m venv .venv
+.venv\Scripts\activate.bat
 pip install -r requirements.txt
 ```
 
@@ -132,14 +174,16 @@ You should see:
 
 ---
 
-## Voice Picking Client (Native)
+## Voice Picking Client (Native — macOS Only)
 
-The voice client is a separate component that communicates with the bridge through MQTT. It provides hands-free, eyes-free warehouse picking using speech recognition and text-to-speech directly on the PC.
+> **Note:** This native voice client uses the macOS `say` command and only runs on macOS. It was the initial development prototype. For a **cross-platform** solution that works on Linux, macOS, and Windows, use the [Web Voice Interface](#web-voice-interface-mobile) below instead.
+
+The voice client communicates with the bridge through MQTT. It provides hands-free, eyes-free warehouse picking using speech recognition and text-to-speech directly on the PC.
 
 ### Install Voice Dependencies
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate       # or .venv\Scripts\activate on Windows
 pip install -r requirements-voice.txt
 ```
 
@@ -243,7 +287,7 @@ Phone (browser)  ──WebSocket──►  Web Server (PC)  ──MQTT──► 
 ### Install Web Dependencies
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate       # or .venv\Scripts\activate on Windows
 pip install -r requirements-web.txt
 ```
 
@@ -275,10 +319,15 @@ Browsers require HTTPS for microphone access on non-localhost addresses. See [we
 Quick setup with mkcert:
 
 ```bash
-brew install mkcert
+# Install mkcert
+# macOS:   brew install mkcert
+# Linux:   sudo apt install mkcert  (or see https://github.com/FiloSottile/mkcert)
+# Windows: choco install mkcert
+
 mkcert -install
 
-# Generate cert for your LAN IP (find with: ifconfig | grep "inet ")
+# Generate cert for your LAN IP
+# Find your IP: ifconfig (macOS/Linux) or ipconfig (Windows)
 cd web/certs
 mkcert 192.168.1.100   # replace with your IP
 ```
@@ -286,9 +335,16 @@ mkcert 192.168.1.100   # replace with your IP
 Then run the server with SSL:
 
 ```bash
+# macOS / Linux
 SSL_CERTFILE=web/certs/192.168.1.100.pem \
 SSL_KEYFILE=web/certs/192.168.1.100-key.pem \
 PIPER_MODEL=models/en_US-bryce-medium.onnx \
+python -m web
+
+# Windows (PowerShell)
+$env:SSL_CERTFILE="web\certs\192.168.1.100.pem"
+$env:SSL_KEYFILE="web\certs\192.168.1.100-key.pem"
+$env:PIPER_MODEL="models\en_US-bryce-medium.onnx"
 python -m web
 ```
 
@@ -315,11 +371,11 @@ Workers open `https://192.168.1.100:8443` on their phones.
 docker-compose up -d
 
 # Terminal 2: MQTT-Odoo bridge
-source .venv/bin/activate
+source .venv/bin/activate           # or .venv\Scripts\activate on Windows
 python -m app
 
 # Terminal 3: Web voice server
-source .venv/bin/activate
+source .venv/bin/activate           # or .venv\Scripts\activate on Windows
 PIPER_MODEL=models/en_US-bryce-medium.onnx python -m web
 
 # Phone: open https://<server-ip>:8443
@@ -349,7 +405,14 @@ See `.env.example` for a template.
 ### Install Mosquitto CLI Tools
 
 ```bash
+# macOS
 brew install mosquitto
+
+# Ubuntu / Debian
+sudo apt install mosquitto-clients
+
+# Windows
+choco install mosquitto
 ```
 
 ### Open a Listener (Terminal 1)
@@ -478,7 +541,7 @@ The bridge polls Odoo every 10 seconds for picking state changes. To test:
 ## Run Tests
 
 ```bash
-source .venv/bin/activate
+source .venv/bin/activate       # or .venv\Scripts\activate on Windows
 python -m pytest tests/ -v
 ```
 
@@ -550,16 +613,16 @@ See [docs/mqtt_api.md](docs/mqtt_api.md) for full topic and payload documentatio
 
 ## Technology Stack
 
-| Component | Technology |
-|-----------|-----------|
-| ERP | Odoo 17 (Docker) |
-| Database | PostgreSQL 15 (Docker) |
-| MQTT Broker | Mosquitto 2 (Docker) |
-| Bridge | Python, paho-mqtt, requests |
-| Speech-to-Text | faster-whisper (local, offline) |
-| Text-to-Speech (native) | macOS `say` command |
-| Text-to-Speech (web) | Piper TTS (local, offline) |
-| Audio Capture (native) | sounddevice (PortAudio) |
-| Audio Capture (web) | Browser MediaRecorder API |
-| Web Server | FastAPI, uvicorn, WebSocket |
-| Audio Conversion | ffmpeg |
+| Component | Technology | Platform |
+|-----------|-----------|----------|
+| ERP | Odoo 17 (Docker) | Any (Docker) |
+| Database | PostgreSQL 15 (Docker) | Any (Docker) |
+| MQTT Broker | Mosquitto 2 (Docker) | Any (Docker) |
+| Bridge | Python, paho-mqtt, requests | Linux, macOS, Windows |
+| Speech-to-Text | faster-whisper (local, offline) | Linux, macOS, Windows |
+| Text-to-Speech (web) | Piper TTS (local, offline) | Linux, macOS, Windows |
+| Text-to-Speech (native) | macOS `say` command | macOS only |
+| Audio Capture (web) | Browser MediaRecorder API | Any phone/browser |
+| Audio Capture (native) | sounddevice (PortAudio) | macOS only (prototype) |
+| Web Server | FastAPI, uvicorn, WebSocket | Linux, macOS, Windows |
+| Audio Conversion | ffmpeg | Linux, macOS, Windows |
