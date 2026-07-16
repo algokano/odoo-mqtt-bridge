@@ -147,6 +147,14 @@ class WebSession:
         self._last_announcement = text
         self._response_texts.append(text)
 
+    def _say_transient(self, text: str):
+        """Speak a line for this turn only, WITHOUT changing what "repeat" replays.
+
+        Used for feedback like a wrong-barcode warning: the worker should still
+        be able to say "repeat" and hear the actual pick instruction, not the error.
+        """
+        self._response_texts.append(text)
+
     # --- State handlers (mirrors voice/client.py) ---
 
     async def _handle_idle(self, intent):
@@ -238,13 +246,13 @@ class WebSession:
             if self._last_announcement:
                 self._say(self._last_announcement)
         elif intent.type == IntentType.NEXT_ITEM:
-            self._say("Please confirm the current item first, or say confirm.")
+            self._say_transient("Please confirm the current item first, or say confirm.")
         elif intent.type == IntentType.STOP:
             self._say(prompts.goodbye())
         else:
             line = self.ctx.current_line()
             qty = line.get("qty_demand", 0) if line else 0
-            self._say(f"Say confirm {int(qty)} to confirm, or repeat to hear again.")
+            self._say_transient(f"Say confirm {int(qty)} to confirm, or repeat to hear again.")
 
     async def _confirm_line(self, move_line_id: int, qty: float):
         self.state = State.CONFIRMING
@@ -298,14 +306,16 @@ class WebSession:
                 self._say(prompts.check_digit_correct())
                 self._verify_product()
             else:
-                self._say(prompts.check_digit_wrong())
+                self._say_transient(prompts.check_digit_wrong())
+                if self._last_announcement:
+                    self._say_transient(self._last_announcement)
         elif intent.type == IntentType.REPEAT:
             if self._last_announcement:
                 self._say(self._last_announcement)
         elif intent.type == IntentType.STOP:
             self._say(prompts.goodbye())
         else:
-            self._say("Please say the check digit to confirm your location.")
+            self._say_transient("Please say the check digit to confirm your location.")
 
     def _verify_product(self):
         line = self.ctx.current_line()
@@ -332,14 +342,16 @@ class WebSession:
                 self._say(prompts.barcode_correct())
                 self._verify_quantity()
             else:
-                self._say(prompts.barcode_wrong())
+                self._say_transient(prompts.barcode_wrong())
+                if self._last_announcement:
+                    self._say_transient(self._last_announcement)
         elif intent.type == IntentType.REPEAT:
             if self._last_announcement:
                 self._say(self._last_announcement)
         elif intent.type == IntentType.STOP:
             self._say(prompts.goodbye())
         else:
-            self._say("Please say the last digits of the barcode.")
+            self._say_transient("Please say the last digits of the barcode.")
 
     def _verify_quantity(self):
         line = self.ctx.current_line()
@@ -369,7 +381,7 @@ class WebSession:
         elif intent.type == IntentType.STOP:
             self._say(prompts.goodbye())
         else:
-            self._say("Please say the quantity to pick.")
+            self._say_transient("Please say the quantity to pick.")
 
     # --- Dispatch ---
 
@@ -437,6 +449,70 @@ class WebSession:
         })
 
         # Generate TTS audio
+        wav_audio = b""
+        if full_text:
+            try:
+                wav_audio = await asyncio.to_thread(tts_piper.synthesize, full_text)
+            except Exception as e:
+                logger.error("Session %s: TTS failed: %s", self.session_id, e)
+                messages.append({"type": "error", "message": f"TTS failed: {e}"})
+
+        messages.append({"type": "listening"})
+        return messages, wav_audio
+
+    async def process_barcode(self, code: str) -> tuple[list[dict], bytes]:
+        """Confirm the current expected item from a scanned barcode.
+
+        A hands-on alternative to the spoken "confirm" command: if the
+        scanned code matches the current line's product barcode, the line is
+        confirmed through the exact same MQTT path as voice (`_confirm_line`).
+        The voice workflow and state machine are otherwise unchanged.
+
+        Args:
+            code: Barcode string decoded by the browser scanner.
+
+        Returns:
+            Tuple of (json_messages, wav_audio_bytes), same shape as process_audio.
+        """
+        self._response_texts = []
+        code = (code or "").strip()
+        messages: list[dict] = [{"type": "transcript", "text": f"Scanned: {code}"}]
+
+        try:
+            line = self.ctx.current_line()
+            if not code:
+                self._say(prompts.please_repeat())
+            elif line is None:
+                # No active item to confirm (idle / picking complete).
+                self._say("Say next item to begin.")
+            else:
+                expected = line.get("barcode")
+                if expected and str(expected).strip() != code:
+                    logger.info("Session %s: barcode mismatch (scanned=%s, expected=%s)",
+                                self.session_id, code, expected)
+                    # Warn, but keep "repeat" pointing at the pick instruction, and
+                    # re-announce what to pick so the worker isn't left guessing.
+                    self._say_transient(prompts.barcode_wrong())
+                    if self._last_announcement:
+                        self._say_transient(self._last_announcement)
+                else:
+                    await self._confirm_line(line["move_line_id"], line.get("qty_demand", 0))
+        except Exception as e:
+            logger.exception("Session %s: error processing barcode", self.session_id)
+            self._say(prompts.error_message(str(e)))
+            self.state = State.IDLE
+
+        return await self._finalize_response(messages)
+
+    async def _finalize_response(self, messages: list[dict]) -> tuple[list[dict], bytes]:
+        """Append the state message + synthesized TTS audio, mirroring process_audio."""
+        full_text = " ".join(self._response_texts)
+        messages.append({
+            "type": "state",
+            "state": self.state.name,
+            "text": full_text,
+        })
+
         wav_audio = b""
         if full_text:
             try:

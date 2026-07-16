@@ -136,6 +136,15 @@ async def websocket_endpoint(ws: WebSocket):
                             session.mode = new_mode
                             logger.info("Session %s: mode changed to %s", session_id, new_mode)
 
+                    elif msg_type == "barcode":
+                        # Scanned barcode = alternative confirm of the current item.
+                        # Reuses the same session pipeline (and MQTT confirm) as voice.
+                        messages, wav_audio = await session.process_barcode(msg.get("code", ""))
+                        for m in messages:
+                            await ws.send_text(json.dumps(m))
+                        if wav_audio:
+                            await ws.send_bytes(wav_audio)
+
                     elif msg_type == "end_session":
                         break
 

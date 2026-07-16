@@ -148,6 +148,89 @@
             opacity: 0.5;
             cursor: not-allowed;
         }
+
+        #button-area {
+            gap: 24px;
+            align-items: center;
+        }
+
+        #scan-btn {
+            width: 96px;
+            height: 96px;
+            border-radius: 50%;
+            border: 4px solid #0f3460;
+            background: #16213e;
+            color: #eee;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            transition: all 0.15s;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        #scan-btn:active { transform: scale(1.08); }
+        #scan-btn .icon { font-size: 28px; margin-bottom: 2px; }
+        #scan-btn .label { font-size: 11px; }
+        #scan-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        #scanner-overlay {
+            position: fixed;
+            inset: 0;
+            background: #000;
+            display: none;
+            flex-direction: column;
+            z-index: 100;
+        }
+
+        #scanner-overlay.active { display: flex; }
+
+        #scanner-video {
+            flex: 1;
+            width: 100%;
+            object-fit: cover;
+        }
+
+        #scanner-reticle {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 70%;
+            max-width: 320px;
+            height: 140px;
+            border: 3px solid #2ecc71;
+            border-radius: 12px;
+            box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.45);
+        }
+
+        #scanner-hint {
+            position: absolute;
+            top: 24px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: #fff;
+            font-size: 15px;
+            padding: 0 20px;
+        }
+
+        #scanner-cancel {
+            position: absolute;
+            bottom: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 14px 32px;
+            border: none;
+            border-radius: 24px;
+            background: #e74c3c;
+            color: #fff;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -170,8 +253,19 @@
                 <div class="icon">&#127908;</div>
                 <div class="label">HOLD TO SPEAK</div>
             </button>
+            <button id="scan-btn" disabled>
+                <div class="icon">&#128247;</div>
+                <div class="label">SCAN</div>
+            </button>
         </div>
     </main>
+
+    <div id="scanner-overlay">
+        <video id="scanner-video" playsinline muted></video>
+        <div id="scanner-reticle"></div>
+        <div id="scanner-hint">Point the camera at the item barcode</div>
+        <button id="scanner-cancel">Cancel</button>
+    </div>
 
     <script>
     (function() {
@@ -181,6 +275,13 @@
         const promptText = document.getElementById('prompt-text');
         const transcriptEl = document.getElementById('transcript');
         const talkBtn = document.getElementById('talk-btn');
+        const scanBtn = document.getElementById('scan-btn');
+        const scannerOverlay = document.getElementById('scanner-overlay');
+        const scannerVideo = document.getElementById('scanner-video');
+        const scannerCancel = document.getElementById('scanner-cancel');
+
+        // Barcode scanning uses the native BarcodeDetector API (Android Chrome).
+        const barcodeSupported = 'BarcodeDetector' in window;
 
         // --- State ---
         let ws = null;
@@ -190,6 +291,7 @@
         let isRecording = false;
         let isProcessing = false;
         let audioCtxUnlocked = false;
+        let currentAudio = null;
 
         // --- WebSocket ---
         function connect() {
@@ -221,6 +323,7 @@
                 dot.className = '';
                 dot.title = 'Disconnected';
                 talkBtn.disabled = true;
+                scanBtn.disabled = true;
                 promptText.textContent = 'Disconnected. Reconnecting...';
                 stateBadge.textContent = 'OFFLINE';
                 setTimeout(connect, 2000);
@@ -248,6 +351,7 @@
                     isProcessing = false;
                     talkBtn.classList.remove('processing');
                     talkBtn.disabled = false;
+                    scanBtn.disabled = !barcodeSupported;
                     break;
                 case 'event':
                     if (msg.event === 'picking_ready') {
@@ -263,14 +367,23 @@
         // --- Audio Playback ---
         function playAudio(arrayBuffer) {
             if (!arrayBuffer || arrayBuffer.byteLength === 0) return;
+            stopPlayback();  // never let two clips overlap
             const blob = new Blob([arrayBuffer], { type: 'audio/wav' });
             const url = URL.createObjectURL(blob);
             const audio = new Audio(url);
-            audio.onended = function() { URL.revokeObjectURL(url); };
-            audio.onerror = function() { URL.revokeObjectURL(url); };
+            currentAudio = audio;
+            audio.onended = function() { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; };
+            audio.onerror = function() { URL.revokeObjectURL(url); if (currentAudio === audio) currentAudio = null; };
             audio.play().catch(function(e) {
                 console.warn('Audio playback failed:', e);
             });
+        }
+
+        function stopPlayback() {
+            if (currentAudio) {
+                try { currentAudio.pause(); currentAudio.currentTime = 0; } catch (e) {}
+                currentAudio = null;
+            }
         }
 
         // --- iOS Audio Context Unlock ---
@@ -357,6 +470,7 @@
         function onPressStart(e) {
             e.preventDefault();
             unlockAudio();
+            stopPlayback();  // barge-in: don't talk over the worker
             startRecording();
         }
 
@@ -376,6 +490,79 @@
         talkBtn.addEventListener('mouseleave', function(e) {
             if (isRecording) onPressEnd(e);
         });
+
+        // --- Barcode Scanning (native BarcodeDetector) ---
+        let barcodeDetector = null;
+        let scanStream = null;
+        let scanTimer = null;
+        let scanBusy = false;
+
+        async function startScan() {
+            if (!barcodeSupported) {
+                promptText.textContent = 'Barcode scanning is not supported on this browser.';
+                return;
+            }
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+            try {
+                if (!barcodeDetector) {
+                    const formats = await window.BarcodeDetector.getSupportedFormats();
+                    barcodeDetector = new window.BarcodeDetector({ formats: formats });
+                }
+                scanStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: { ideal: 'environment' } }
+                });
+                scannerVideo.srcObject = scanStream;
+                await scannerVideo.play();
+                scannerOverlay.classList.add('active');
+                scanBusy = false;
+                scanTimer = setInterval(detectFrame, 250);
+            } catch (e) {
+                console.error('Camera/scanner error:', e);
+                promptText.textContent = 'Camera access denied or unavailable.';
+                stopScan();
+            }
+        }
+
+        async function detectFrame() {
+            if (scanBusy || !barcodeDetector || scannerVideo.readyState < 2) return;
+            scanBusy = true;
+            try {
+                const codes = await barcodeDetector.detect(scannerVideo);
+                if (codes && codes.length > 0) {
+                    const value = codes[0].rawValue;
+                    stopScan();
+                    sendBarcode(value);
+                }
+            } catch (e) {
+                // Transient detect errors are non-fatal; keep scanning.
+            } finally {
+                scanBusy = false;
+            }
+        }
+
+        function stopScan() {
+            if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+            if (scanStream) {
+                scanStream.getTracks().forEach(function(t) { t.stop(); });
+                scanStream = null;
+            }
+            scannerVideo.srcObject = null;
+            scannerOverlay.classList.remove('active');
+        }
+
+        function sendBarcode(code) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            unlockAudio();
+            stopPlayback();  // stop any playing clip when a scan is submitted
+            transcriptEl.innerHTML = 'Scanned: <span>"' + escapeHtml(code) + '"</span>';
+            talkBtn.disabled = true;
+            scanBtn.disabled = true;
+            ws.send(JSON.stringify({ type: 'barcode', code: code }));
+        }
+
+        scanBtn.addEventListener('click', startScan);
+        scannerCancel.addEventListener('click', stopScan);
 
         // --- Escape HTML ---
         function escapeHtml(str) {
