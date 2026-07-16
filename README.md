@@ -21,6 +21,7 @@ A Python bridge that connects Odoo and MQTT for warehouse picking workflows, ext
                                          │  Mobile Phone   │
                                          │  Browser        │
                                          │ • Push-to-talk  │
+                                         │ • Barcode scan  │
                                          │ • Audio playback│
                                          └─────────────────┘
 ```
@@ -284,6 +285,19 @@ Phone (browser)  ──WebSocket──►  Web Server (PC)  ──MQTT──► 
 5. Server generates TTS audio (Piper) and sends it back
 6. Phone plays the spoken response
 
+### Barcode Scanning (Confirm by Camera)
+
+As an alternative to *saying* "confirm", the worker can **scan the item's barcode** to confirm the current pick. Tap the **SCAN** button, point the phone camera at the product barcode, and if it matches the expected item the pick is confirmed automatically.
+
+- Uses the browser's native **`BarcodeDetector`** API — no external library, works fully offline. Supported on **Android Chrome**; **not** supported on iOS Safari (the SCAN button is disabled there).
+- A scan confirms the **full demanded quantity**. Use voice (`confirm <n>`) when you need a partial quantity — a barcode carries no count.
+- On a wrong/mismatched barcode the server says *"Wrong barcode"* and **re-announces** what to pick, so the worker is never left without the instruction.
+- Reuses the existing confirm flow (`warehouse/picking/confirm`) — **no new MQTT topics** and no changes to the bridge or Odoo.
+- The product must have its **Barcode** field set in Odoo. For testing, Odoo can render a matching barcode image:
+  `http://<odoo-host>:8069/report/barcode/?barcode_type=EAN13&value=<code>&width=600&height=150`
+
+Workflow: say **"next item"** to load a pick → tap **SCAN** and scan the item → *"Confirmed."*
+
 ### Install Web Dependencies
 
 ```bash
@@ -361,8 +375,24 @@ Workers open `https://192.168.1.100:8443` on their phones.
 | `PIPER_MODEL` | — | Path to Piper `.onnx` model file |
 | `VOICE_MODE` | `simple` | `simple` or `verified` |
 | `WHISPER_MODEL` | `base.en` | Whisper model size |
+| `HF_HUB_OFFLINE` | — | Set to `1` to load the cached Whisper model without contacting huggingface.co (required for fully offline demos) |
 | `MQTT_HOST` | `localhost` | MQTT broker host |
 | `MQTT_PORT` | `1883` | MQTT broker port |
+
+### Offline Operation (No Internet)
+
+The full stack runs **without internet at runtime** — e.g. when the mini PC acts as a standalone Wi-Fi access point for the phone:
+
+- The web UI is self-contained (inline CSS/JS, system fonts — no CDN, fonts, or external APIs).
+- STT (Whisper) and TTS (Piper) run locally; barcode scanning uses the browser's built-in `BarcodeDetector`.
+- The bridge talks only to localhost Odoo (JSON-RPC) and localhost Mosquitto.
+
+The **only** startup call that reaches the network is faster-whisper checking huggingface.co for the model. Disable it by setting **`HF_HUB_OFFLINE=1`** (e.g. add it to `.env`); the model then loads straight from the local cache. Pre-download the model **once** (with internet) so the cache exists, then the demo needs no connectivity.
+
+```bash
+# in .env
+HF_HUB_OFFLINE=1
+```
 
 ### Running the Full Stack
 
